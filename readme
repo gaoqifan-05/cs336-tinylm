@@ -1,0 +1,75 @@
+# 背景
+现状：只看完 CS336 课程讲义/视频，**没有写过课程作业、没有代码产出**，现在短期（7‑14天）补做可落地的最小可验证项目，用来丰富CV，**不造假，真实可复现，GitHub可展示，申请硕士够用**。
+> 目标产出：GitHub仓库 + 可运行代码 + 简单实验结果（perplexity、训练loss曲线），然后把对应的成果写进CV。
+> 时间分两档：**7天极速版**、**14天完整版**。
+> 注意：不要硬上千亿大模型；只做**decoder‑only small LM（几十M参数级别）**，单GPU（Colab Pro / 本地3060/4060）就能跑。
+
+## 短期可以真实完成的内容（优先级从高到低）
+### ✅7天极速版（最低可行，CV够用，适合时间很紧）
+> 目标：从零手写最小 Decoder‑only Transformer，跑通预训练，输出loss/ppl，不要碰分布式并行（并行代码工作量大，短期很难写对）
+**要完成的模块**
+1. 手动实现核心组件（PyTorch）
+    - 简易BPE分词（或者直接用HuggingFace‑tokenizers库实现BPE训练，不用完全手搓字节合并逻辑，节省时间）
+    - Decoder‑Only Transformer block：Multi‑Head Attention、FeedForward、Pre‑Norm
+    - RoPE 位置编码（CS336重点，比原生positional embedding更有亮点）
+    - KV‑cache推理（**CV里非常亮眼，生成时加速**）
+2. 训练：在 Wikitext‑2 子集做预训练
+    - Cosine LR scheduler、weight decay、mixed precision AMP
+    - 记录训练loss，计算验证集 **perplexity**（核心量化指标）
+3. 简单文本生成：greedy / top‑k sampling
+4. 输出：GitHub，README写清楚环境、训练命令、loss曲线截图、验证集PPL数值。
+
+**7天版对应的CV文案（真实完成后复制）**
+> Stanford CS336: Language Modeling from Scratch | Self‑instructed | Aug 2025 – Dec 2025
+> • Built a minimal decoder‑only Transformer language model in PyTorch inspired by CS336 materials, implemented RoPE positional embedding and KV‑cache for efficient autoregressive inference
+> • Trained model on WikiText‑2 subset with cosine learning rate scheduling and mixed‑precision training; evaluated language modeling performance via held‑out perplexity
+> • Surveyed modern LLM stack: tokenization, scaling‑law observations, parallel training concepts and SFT alignment techniques
+> GitHub: {your link}
+
+> 关键点：不说自己实现tensor/pipeline parallel（7天写不完，不要写）；用词 `Built / Implemented / Evaluated / Surveyed`，不说conduct ablation（消融实验更费时间）。
+
+---
+
+### ✅14天完整版（上限，效果很强，接近CS336作业水平）
+在7天版本全部做完的基础上，再加下面三件事，工作量可控：
+1. **小消融实验 ablation（CV加分大）**
+改变1‑2个超参，对比验证集 PPL：
+- 比如：不同模型维度（d_model=128 / 256）、不同head数量；画出对比loss/ppl表格/折线图。
+> 不需要大规模scaling law，小规模就足够，可以写：*observed performance gain with increased model capacity on small corpus*。
+2. 极简SFT微调（不做RLHF，RLHF短期做不出来）
+拿一小份 instruction dataset（比如alpaca‑tiny几十条样本），做Supervised Fine‑Tuning，观察生成文本的变化。
+3. 文档完善：README写实验观察，放训练曲线图、PPL表格。
+
+**14天完整版CV片段（做完再用）**
+> Stanford CS336: Language Modeling from Scratch | Self‑instructed | Aug 2025 – Dec 2025
+> • Implemented a decoder‑only Transformer LM from scratch in PyTorch, including BPE tokenizer training, RoPE positional embedding, and KV‑cache‑accelerated autoregressive generation
+> • Pre‑trained small‑scale language model on WikiText‑2, applied cosine LR scheduling, weight decay and mixed‑precision training; conducted hyper‑parameter ablation and reported held‑out perplexity
+> • Performed lightweight supervised fine‑tuning on tiny instruction dataset to study basic LLM alignment; surveyed model parallelism and scaling‑law principles from CS336
+> GitHub: {your link}
+
+---
+
+# ❌短期不要碰的东西（避坑，不要写进CV，很容易面试翻车）
+1. ❌不要手写 Tensor Parallel / Pipeline Parallel：代码量大、调试难，单卡看不到效果，短期内很难真正跑通。**可以写“surveyed / studied”学习了解概念，但不要写implemented。**
+2. ❌不要说复现完整 Scaling Laws：scaling law需要大量算力，几十M小模型只能看到微小趋势，不要夸大。
+3. ❌不要做 RLHF / DPO：工作量巨大，两周很难做出有意义结果。
+4. ❌不要跑7B大模型预训练：消费级GPU根本扛不住。
+
+# 🛠️实操建议（少踩坑）
+1. 数据集：WikiText‑2，很小，下载快，适合小模型预训练。
+2. 算力选项
+    - 免费：Google Colab T4 GPU（会超时，适合小实验）
+    - 付费：Colab Pro A100；或者本地RTX3060/4060，几十M模型完全hold住。
+3. 参考代码起点（不要直接复制粘贴交作业，理解再改写）
+    - CS336官方assignment骨架；minGPT（Andrej Karpathy）作为参考，自己重写RoPE、KV‑cache部分。
+4. 面试准备：写完之后，你要能口头解释：RoPE原理、KV‑cache为什么加速、perplexity含义、mixed precision作用，面试官很容易问到。
+
+# 时间分配示例【7天极速版】
+Day1‑2：写Transformer Decoder块 + RoPE实现
+Day3：BPE处理数据集、dataloader
+Day4：预训练训练循环、AMP、cosine lr
+Day5：实现KV‑cache，文本生成greedy/top‑k
+Day6：跑训练，保存loss曲线，计算验证集PPL
+Day7：整理README，上传GitHub，写CV描述
+
+如果你需要，我可以给你一份极简项目README模板，或者给一份关键模块伪代码清单。
