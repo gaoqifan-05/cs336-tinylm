@@ -19,7 +19,7 @@
 conda create -n cs336 python=3.11 -y
 conda activate cs336
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install transformers datasets tokenizers tqdm matplotlib pandas requests modelscope
+pip install tokenizers pandas pyarrow requests matplotlib
 ```
 
 ## 🚀 快速开始
