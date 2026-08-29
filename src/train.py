@@ -34,7 +34,16 @@ def parse_args():
     p.add_argument("--seq_len", type=int, default=256, help="序列长度（训练用短些，快）")
     p.add_argument("--lr", type=float, default=3e-4, help="峰值学习率")
     p.add_argument("--weight_decay", type=float, default=0.1, help="AdamW weight decay")
+    p.add_argument("--dropout", type=float, default=0.1, help="模型 dropout 概率")
+    p.add_argument("--label_smoothing", type=float, default=0.0,
+                   help="标签平滑系数；0 表示关闭（0.1 是常用值）")
     p.add_argument("--warmup_steps", type=int, default=200, help="warmup 步数")
+    p.add_argument("--grad_clip", type=float, default=1.0,
+                   help="梯度裁剪范数（None/0 表示不裁剪）")
+    p.add_argument("--ema_decay", type=float, default=0.999,
+                   help="EMA 衰减系数；0 表示关闭 EMA")
+    p.add_argument("--ema_start_step", type=int, default=0,
+                   help="EMA 延迟启用的步数；0 表示训练一开始就启用（默认）")
     p.add_argument("--eval_every", type=int, default=500, help="每多少步验证一次")
     p.add_argument("--log_every", type=int, default=50, help="每多少步打印一次")
     p.add_argument("--max_steps", type=int, default=None, help="最大步数（调试用）")
@@ -45,6 +54,12 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out_dir", type=str, default="outputs")
     p.add_argument("--ckpt_dir", type=str, default="checkpoints")
+    p.add_argument("--tag", type=str, default=None,
+                   help="实验标签，会拼进文件名（如 seq512_3ep），便于区分不同实验")
+    p.add_argument("--resume", type=str, default=None,
+                   help="从指定 checkpoint 热启动（加载模型权重继续训练）")
+    p.add_argument("--fine_tune", type=float, default=0.0,
+                   help="精修模式：用此固定小 LR 训练（如 1e-5），不用 warmup/cosine")
     return p.parse_args()
 
 
@@ -75,6 +90,76 @@ def evaluate(model, val_loader, device):
     return avg_loss, ppl
 
 
+class EMA:
+    """
+    指数移动平均（Exponential Moving Average）。
+    维护一份模型权重的滑动平均，训练后期参数在最优解附近震荡时，
+    EMA 权重相当于"平均解"，更平滑、泛化更好。用 EMA 权重做验证/生成。
+
+    更新公式：ema = decay * ema + (1 - decay) * param
+    用法：
+        ema = EMA(model, decay=0.999)
+        每步训练后: ema.update(model)
+        验证时:     ema.apply_shadow()  # 临时换到 EMA 权重
+                    evaluate(...)
+                    ema.restore()       # 换回在线权重
+    """
+
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {}                      # 保存 EMA 权重
+        self.backup = {}                      # 保存在线权重（临时用）
+        self.initialized = False              # 是否已初始化（延迟启用用）
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    @torch.no_grad()
+    def update(self, model):
+        """每步训练后更新 EMA 权重"""
+        if self.decay <= 0:
+            return
+        if not self.initialized:
+            return  # 尚未到启用步数，不更新
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name].mul_(self.decay).add_(param.data, alpha=1 - self.decay)
+
+    @torch.no_grad()
+    def activate(self, model):
+        """
+        延迟启用：把 shadow 重置为当前权重。
+        这样 EMA 的起点就是"已成熟的在线权重"，几乎零滞后，
+        从启用时刻开始平滑后续训练。
+        """
+        if self.decay <= 0:
+            return
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name].copy_(param.data)
+        self.initialized = True
+
+    @torch.no_grad()
+    def apply_shadow(self, model):
+        """把模型权重临时换成 EMA 权重（用于验证/生成）"""
+        if self.decay <= 0:
+            return
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+
+    @torch.no_grad()
+    def restore(self, model):
+        """恢复在线权重"""
+        if self.decay <= 0:
+            return
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                param.data.copy_(self.backup[name])
+        self.backup.clear()
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -96,10 +181,16 @@ def main():
         n_layers=args.n_layers,
         d_ff=args.d_ff,
         max_seq_len=args.seq_len,
-        dropout=0.1,
+        dropout=args.dropout,
     )
     model = DecoderOnlyLM(cfg).to(device)
     print(f"模型参数量: {model.param_count()/1e6:.2f}M")
+
+    # 可选：从 checkpoint 热启动（加载模型权重继续训练）
+    if args.resume:
+        resume_ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(resume_ckpt["model"])
+        print(f"已从 {args.resume} 加载权重继续训练（原验证 PPL ≈ {resume_ckpt.get('val_ppl', '?')}）")
 
     # 3. 优化器（AdamW + weight decay）
     optimizer = torch.optim.AdamW(
@@ -109,29 +200,49 @@ def main():
         betas=(0.9, 0.95),
     )
 
-    # 4. Cosine LR scheduler（带 warmup）
-    #    总步数：先算个估计值，保证 schedule 完整
-    total_steps = args.max_steps or (len(train_loader) * args.epochs)
-    # warmup 占比不能超过 0.3（否则 pct_start 超过 1 报错）
-    warmup_pct = min(args.warmup_steps / total_steps, 0.3)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=args.lr,
-        total_steps=total_steps,
-        pct_start=warmup_pct,
-        anneal_strategy="cos",
-    )
+    # 4. LR scheduler
+    if args.fine_tune > 0:
+        # 精修模式：固定极小 LR，不用 warmup/cosine，避免打乱已收敛权重
+        for g in optimizer.param_groups:
+            g["lr"] = args.fine_tune
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+        print(f"精修模式：固定 LR = {args.fine_tune}")
+    else:
+        # 正常模式：Cosine LR（带 warmup）
+        total_steps = args.max_steps or (len(train_loader) * args.epochs)
+        warmup_pct = min(args.warmup_steps / total_steps, 0.3)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=args.lr,
+            total_steps=total_steps,
+            pct_start=warmup_pct,
+            anneal_strategy="cos",
+        )
 
     # 5. AMP 混合精度（自动缩放梯度，防止 fp16 下溢）
     scaler = torch.amp.GradScaler("cuda" if torch.cuda.is_available() else "cpu")
 
+    # 6. EMA 指数移动平均（decay=0 则关闭）
+    ema = EMA(model, decay=args.ema_decay)
+    if args.ema_decay > 0:
+        print(f"EMA 已开启，decay = {args.ema_decay}")
+
     # 记录曲线
     train_losses, val_ppls, lrs = [], [], []
-    os.makedirs(args.out_dir, exist_ok=True)
-    os.makedirs(args.ckpt_dir, exist_ok=True)
+
+    # 时间戳：每次训练一个独立目录，避免覆盖之前的实验
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    tag = f"{args.tag}_" if args.tag else ""
+    run_name = f"run_{timestamp}_{tag}{args.seq_len}seq_{args.epochs}ep"
+    run_out_dir = os.path.join(args.out_dir, run_name)
+    run_ckpt_dir = os.path.join(args.ckpt_dir, run_name)
+    os.makedirs(run_out_dir, exist_ok=True)
+    os.makedirs(run_ckpt_dir, exist_ok=True)
+    print(f"实验目录: {run_name}")
 
     print("\n开始训练...")
     global_step = 0
+    best_ppl = float("inf")   # 最佳验证 PPL（用于保存 best.pt）
     for epoch in range(args.epochs):
         for x, y in train_loader:
             if args.max_steps and global_step >= args.max_steps:
@@ -144,15 +255,30 @@ def main():
             with torch.amp.autocast("cuda" if torch.cuda.is_available() else "cpu"):
                 logits, _ = model(x)
                 loss = F.cross_entropy(
-                    logits.reshape(-1, logits.size(-1)), y.reshape(-1)
+                    logits.reshape(-1, logits.size(-1)), y.reshape(-1),
+                    label_smoothing=args.label_smoothing,
                 )
 
             # 反向（scaler 处理 fp16 梯度）
             scaler.scale(loss).backward()
+            # 梯度裁剪（在 AMP 下需先 unscale 还原梯度再裁剪，防止被裁剪到错误尺度）
+            if args.grad_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
+
+            # EMA 延迟启用：到达启用步数时，用当前权重初始化 shadow
+            if (args.ema_decay > 0 and not ema.initialized
+                    and global_step >= args.ema_start_step):
+                ema.activate(model)
+                if args.ema_start_step > 0:
+                    print(f"  → EMA 在 step {global_step} 启用（从当前权重初始化）")
+
+            # 每步训练后更新 EMA 权重（未启用时 update 内部直接跳过）
+            ema.update(model)
 
             train_losses.append(loss.item())
             lrs.append(scheduler.get_last_lr()[0])
@@ -161,14 +287,19 @@ def main():
                 print(f"[epoch {epoch+1}/{args.epochs}] step {global_step} | "
                       f"loss {loss.item():.4f} | lr {scheduler.get_last_lr()[0]:.2e}")
 
-            # 验证
+            # 验证（EMA 已启用才用 EMA 权重；未启用用在线权重）
             if global_step % args.eval_every == 0 and global_step > 0:
-                val_loss, val_ppl = evaluate(model, val_loader, device)
+                if ema.initialized:
+                    ema.apply_shadow(model)
+                    val_loss, val_ppl = evaluate(model, val_loader, device)
+                    ema.restore(model)
+                else:
+                    val_loss, val_ppl = evaluate(model, val_loader, device)
                 val_ppls.append((global_step, val_ppl))
                 print(f"  → 验证 loss {val_loss:.4f} | PPL {val_ppl:.2f}")
 
-                # 保存检查点
-                ckpt_path = os.path.join(args.ckpt_dir, f"step_{global_step}.pt")
+                # 保存检查点（带步数，多个检查点共存）
+                ckpt_path = os.path.join(run_ckpt_dir, f"step_{global_step}.pt")
                 torch.save({
                     "model": model.state_dict(),
                     "config": cfg,
@@ -177,16 +308,35 @@ def main():
                     "train_loss": loss.item(),
                 }, ckpt_path)
 
+                # 若验证 PPL 比历史最优更好，额外保存 best.pt（保存 EMA 权重）
+                if val_ppl < best_ppl:
+                    best_ppl = val_ppl
+                    ema.apply_shadow(model)
+                    best_path = os.path.join(run_ckpt_dir, "best.pt")
+                    torch.save({
+                        "model": model.state_dict(),
+                        "config": cfg,
+                        "step": global_step,
+                        "val_ppl": val_ppl,
+                        "train_loss": loss.item(),
+                        "ema": True,
+                    }, best_path)
+                    ema.restore(model)
+                    print(f"    ★ 新最佳 PPL {val_ppl:.2f}，已保存 {best_path}")
+
             global_step += 1
 
-    # 6. 保存最终模型 + 曲线数据
-    final_path = os.path.join(args.ckpt_dir, "final.pt")
+    # 6. 保存最终模型 + 曲线数据（用 EMA 权重，泛化更好）
+    ema.apply_shadow(model)
+    final_path = os.path.join(run_ckpt_dir, "final.pt")
     torch.save({
         "model": model.state_dict(),
         "config": cfg,
         "step": global_step,
         "val_ppl": val_ppls[-1][1] if val_ppls else None,
+        "ema": True,
     }, final_path)
+    ema.restore(model)
     print(f"\n最终模型已保存: {final_path}")
 
     # 7. 画 loss / lr / ppl 曲线
@@ -205,7 +355,7 @@ def main():
         ax[2].plot(steps, ppls, marker="o")
         ax[2].set_title("Validation Perplexity"); ax[2].set_xlabel("step"); ax[2].set_ylabel("PPL")
     fig.tight_layout()
-    fig_path = os.path.join(args.out_dir, "training_curves.png")
+    fig_path = os.path.join(run_out_dir, "training_curves.png")
     fig.savefig(fig_path, dpi=150)
     print(f"曲线图已保存: {fig_path}")
 
@@ -214,6 +364,7 @@ def main():
         print("\n========== 训练总结 ==========")
         print(f"模型参数量: {model.param_count()/1e6:.2f}M")
         print(f"最终验证集 Perplexity: {val_ppls[-1][1]:.2f}")
+        print(f"最佳验证集 Perplexity: {best_ppl if best_ppl != float('inf') else 'N/A'}（见 best.pt）")
         print(f"（随机初始化时 PPL ≈ {vocab_size}，训练后明显下降说明模型学到语言规律）")
 
 

@@ -62,7 +62,8 @@ def _download_wikitext2() -> dict:
 
     result = {}
     for split, fname in [("train", "train-00000-of-00001.parquet"),
-                         ("validation", "validation-00000-of-00001.parquet")]:
+                         ("validation", "validation-00000-of-00001.parquet"),
+                         ("test", "test-00000-of-00001.parquet")]:
         # 兼容两种命名：手动的 train.parquet 或原始 train-00000-of-00001.parquet
         local = os.path.join(DATA_DIR, f"{split}.parquet")
         raw_local = os.path.join(DATA_DIR, fname)
@@ -102,18 +103,56 @@ def _build_or_load_tokenizer():
     return train_tokenizer(texts, TOKENIZER_PATH)
 
 
-def _tokenize_and_cache(split_lines: List[str], cache_path: str, tokenizer) -> List[int]:
+def _group_into_docs(lines: List[str], eos_id: int, tokenizer) -> List[int]:
+    """
+    文档级拼接：把连续的文本行按空行分成"文档"，
+    同一文档内的行串成一个连续序列（不加 EOS），只在文档边界加 EOS。
+
+    对比旧的"逐行加 EOS"方式，好处是块内上下文连贯，
+    减少"每行开头无前文可依赖"导致的无效预测。
+
+    返回: 拼好的 token id 列表
+    """
+    ids = []
+    current_doc = []  # 当前文档的 token
+
+    for line in lines:
+        if line.strip():
+            current_doc.extend(tokenizer.encode(line.strip()).ids)
+        else:
+            # 空行 = 段落分隔。如果当前文档非空，则在此收尾（加 EOS）
+            if current_doc:
+                current_doc.append(eos_id)
+                ids.extend(current_doc)
+                current_doc = []
+
+    # 处理最后一段没有空行结尾的文档
+    if current_doc:
+        current_doc.append(eos_id)
+        ids.extend(current_doc)
+
+    return ids
+
+
+def _tokenize_and_cache(split_lines: List[str], cache_path: str, tokenizer,
+                        use_doc_concat: bool = False) -> List[int]:
     """把文本行 tokenize 成 id 列表；若已缓存则直接加载"""
     if os.path.exists(cache_path):
         print(f"[data] 加载缓存: {cache_path}")
         return torch.load(cache_path, weights_only=True).tolist()
 
-    print(f"[data] tokenize {len(split_lines)} 行文本 ...")
-    ids = []
+    mode = "文档级拼接" if use_doc_concat else "逐行拼接"
+    print(f"[data] tokenize {len(split_lines)} 行文本（{mode}）...")
     eos_id = tokenizer.token_to_id("<|endoftext|>")
-    for line in split_lines:
-        ids.extend(tokenizer.encode(line).ids)
-        ids.append(eos_id)  # 每行之间加 <|endoftext|> 分隔（GPT-2 做法）
+
+    if use_doc_concat:
+        ids = _group_into_docs(split_lines, eos_id, tokenizer)
+    else:
+        # 逐行拼接：每行之间加 EOS（GPT-2 经典做法，实测在本数据集上更优）
+        ids = []
+        for line in split_lines:
+            ids.extend(tokenizer.encode(line).ids)
+            ids.append(eos_id)
 
     torch.save(torch.tensor(ids), cache_path)
     print(f"[data] 共 {len(ids)} 个 token，已缓存到 {cache_path}")
@@ -126,24 +165,32 @@ def get_dataloaders(
     tokenizer_path: str = TOKENIZER_PATH,
     data_dir: str = DATA_DIR,
     force_retokenize: bool = False,
+    use_doc_concat: bool = False,
+    include_test: bool = False,
 ):
     """
-    返回 (train_loader, val_loader, tokenizer)。
+    返回 (train_loader, val_loader, tokenizer)；
+    若 include_test=True 则额外返回 test_loader。
 
     参数:
         batch_size:       每个 batch 的序列数
         seq_len:          序列长度（= max_seq_len）
         force_retokenize: 强制重新下载/分词（用于换数据集或重训分词器）
+        use_doc_concat:   True=文档级拼接；False=逐行拼接（默认，实测更优）
+        include_test:     True=同时加载 test split（用于最终评估）
     """
     global TOKENIZER_PATH, DATA_DIR, TRAIN_CACHE, VAL_CACHE
     TOKENIZER_PATH = tokenizer_path
     DATA_DIR = data_dir
-    TRAIN_CACHE = os.path.join(data_dir, "train_ids.pt")
-    VAL_CACHE = os.path.join(data_dir, "val_ids.pt")
+    # 两种模式用不同的缓存文件，避免互相覆盖
+    suffix = "_doc" if use_doc_concat else ""
+    TRAIN_CACHE = os.path.join(data_dir, f"train_ids{suffix}.pt")
+    VAL_CACHE = os.path.join(data_dir, f"val_ids{suffix}.pt")
+    TEST_CACHE = os.path.join(data_dir, f"test_ids{suffix}.pt")
 
     # 如果强制重建，先清掉缓存
     if force_retokenize:
-        for p in (TOKENIZER_PATH, TRAIN_CACHE, VAL_CACHE):
+        for p in (TOKENIZER_PATH, TRAIN_CACHE, VAL_CACHE, TEST_CACHE):
             if os.path.exists(p):
                 os.remove(p)
                 print(f"[data] 已删除缓存 {p}")
@@ -153,14 +200,16 @@ def get_dataloaders(
     vocab_size = tokenizer.get_vocab_size()
 
     # 2. 文本 → token id（带缓存）
-    texts = None
-    if not os.path.exists(TRAIN_CACHE) or not os.path.exists(VAL_CACHE):
+    need_download = (not os.path.exists(TRAIN_CACHE)
+                     or not os.path.exists(VAL_CACHE)
+                     or (include_test and not os.path.exists(TEST_CACHE)))
+    if need_download:
         texts = _download_wikitext2()
     else:
-        texts = {"train": [], "validation": []}
+        texts = {"train": [], "validation": [], "test": []}
 
-    train_ids = _tokenize_and_cache(texts["train"], TRAIN_CACHE, tokenizer)
-    val_ids = _tokenize_and_cache(texts["validation"], VAL_CACHE, tokenizer)
+    train_ids = _tokenize_and_cache(texts["train"], TRAIN_CACHE, tokenizer, use_doc_concat)
+    val_ids = _tokenize_and_cache(texts["validation"], VAL_CACHE, tokenizer, use_doc_concat)
 
     # 3. 构建 Dataset + DataLoader
     train_ds = TokenDataset(train_ids, seq_len)
@@ -176,6 +225,17 @@ def get_dataloaders(
 
     print(f"[data] 训练 batch 数: {len(train_loader)}, 验证 batch 数: {len(val_loader)}")
     print(f"[data] 词表大小: {vocab_size}")
+
+    # 可选：test split（最终评估用）
+    if include_test:
+        test_ids = _tokenize_and_cache(texts["test"], TEST_CACHE, tokenizer, use_doc_concat)
+        test_ds = TokenDataset(test_ids, seq_len)
+        test_loader = DataLoader(
+            test_ds, batch_size=batch_size, shuffle=False, num_workers=0,
+        )
+        print(f"[data] 测试 batch 数: {len(test_loader)}")
+        return train_loader, val_loader, test_loader, tokenizer
+
     return train_loader, val_loader, tokenizer
 
 

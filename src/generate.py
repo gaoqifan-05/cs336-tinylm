@@ -42,6 +42,13 @@ def generate(
     x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     print(f"prompt: {prompt!r} → {len(prompt_ids)} tokens")
 
+    # 保护：生成总长度不能超过 max_seq_len（RoPE 表长度）
+    max_seq_len = model.cfg.max_seq_len
+    max_new_tokens = min(max_new_tokens, max_seq_len - len(prompt_ids))
+    if max_new_tokens <= 0:
+        raise ValueError(f"prompt 长度 {len(prompt_ids)} 已超过 max_seq_len={max_seq_len}")
+    print(f"将生成 {max_new_tokens} 个 token（上限受 max_seq_len 限制）")
+
     generated = list(prompt_ids)
 
     # 2. 逐 token 生成（KV-cache 加速）
@@ -72,9 +79,32 @@ def generate(
     return text
 
 
+def find_latest_ckpt(ckpt_dir: str = "checkpoints") -> str:
+    """自动找到最新的实验目录里的最佳模型（优先 best.pt，否则 final.pt）"""
+    if not os.path.isdir(ckpt_dir):
+        return os.path.join(ckpt_dir, "final.pt")
+
+    # 找出所有 run_* 目录，按名字（含时间戳）倒序取最新
+    runs = [d for d in os.listdir(ckpt_dir) if d.startswith("run_")]
+    if not runs:
+        # 兼容旧的直接放 final.pt 的情况
+        old = os.path.join(ckpt_dir, "final.pt")
+        return old if os.path.exists(old) else os.path.join(ckpt_dir, "final.pt")
+
+    runs.sort(reverse=True)   # 名字含 YYYYMMDD_HHMMSS，字典序=时间序
+
+    # 最新 run 里优先取 best.pt（验证集最优），否则用 final.pt
+    latest_dir = os.path.join(ckpt_dir, runs[0])
+    best = os.path.join(latest_dir, "best.pt")
+    if os.path.exists(best):
+        return best
+    return os.path.join(latest_dir, "final.pt")
+
+
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--ckpt", type=str, default="checkpoints/final.pt", help="模型权重路径")
+    p.add_argument("--ckpt", type=str, default=None,
+                   help="模型权重路径；默认自动选最新的实验目录")
     p.add_argument("--prompt", type=str, default="The meaning of life is", help="生成起始文本")
     p.add_argument("--max_new_tokens", type=int, default=100)
     p.add_argument("--top_k", type=int, default=None, help="top-k 采样；None 表示 greedy")
@@ -87,6 +117,10 @@ if __name__ == "__main__":
     args = parse_args()
     torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # 自动定位最新 checkpoint
+    if args.ckpt is None:
+        args.ckpt = find_latest_ckpt()
 
     # 加载分词器 + 模型
     tokenizer = load_tokenizer(TOKENIZER_PATH)
