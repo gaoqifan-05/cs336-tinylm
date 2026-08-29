@@ -7,7 +7,7 @@
 - **手写核心组件**：RMSNorm、RoPE 旋转位置编码、Multi-Head Attention（带 KV-cache）、SwiGLU FFN、Weight Tying
 - **KV-cache 加速生成**：逐 token 自回归推理时缓存历史 K/V，避免重复计算（冒烟测试已证明与全量计算一致）
 - **完整训练管线**：混合精度 AMP、Cosine LR schedule + warmup、Weight decay（AdamW）
-- **可复现结果**：WikiText-2 验证集 perplexity 从随机 50257 降至 **201.1**，附训练曲线与完整消融对比表
+- **可复现结果**：WikiText-2 验证集 perplexity 从随机 50257 降至 **183.2**（41.5M 模型），附训练曲线与完整消融对比表
 
 ## 📦 环境要求
 
@@ -15,18 +15,12 @@
 - PyTorch 2.6+（CUDA 12.x）
 - 建议：NVIDIA GPU（RTX 3060/4060 或以上，8GB 显存足够）
 
-```bash
-conda create -n cs336 python=3.11 -y
-conda activate cs336
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install tokenizers pandas pyarrow requests matplotlib
-```
 
 ## 🚀 快速开始
 
 ### 1. 准备数据（首次）
 
-数据集会自动下载并缓存到 `data/`（国内网络建议用 hf-mirror，`data.py` 已内置支持手动放置 `train.parquet` / `validation.parquet`）。
+数据集会自动下载并缓存到 `data/`。
 
 ### 2. 训练
 
@@ -35,7 +29,7 @@ pip install tokenizers pandas pyarrow requests matplotlib
 python src/train.py --max_steps 30 --epochs 1 --batch_size 4 --seq_len 64 \
     --d_model 64 --n_heads 4 --n_layers 2 --d_ff 128
 
-# 正式训练（PPL 最佳配置：16ep + 正则化 + EMA，约 2 小时）
+# 正式训练（PPL 最佳配置：16ep + 正则化 + EMA，约 1 小时）
 python src/train.py --epochs 16 --batch_size 16 --seq_len 256 \
     --lr 5e-4 --warmup_steps 400 --grad_clip 1.0 \
     --dropout 0.2 --label_smoothing 0.1 --weight_decay 0.15 \
@@ -77,13 +71,15 @@ python src/data.py         # 数据管道自测
 
 | 指标 | 值 |
 |---|---|
-| 模型参数量 | 16.8M |
+| 模型参数量 | 16.8M（d256）/ 41.5M（d512）|
 | 词表大小 (BPE) | 50,257 |
 | 训练集 tokens | 2.2M |
 | 验证集 tokens | 238K |
 | 最佳训练 loss | ~4.69 |
-| **最佳验证集 Perplexity** | **201.1**（best.pt，随机初始化 50257）|
+| **最佳验证集 Perplexity** | **183.2**（d512, best.pt，随机初始化 50257）|
 | 训练设备 | RTX 4060 Laptop (8GB) |
+
+> 注：默认配置为 d_model=256（16.8M，PPL 201.1）；容量消融发现 d_model=512（41.5M）可达 PPL 183.2。
 
 ### 训练曲线（16ep 基线）
 
@@ -106,6 +102,29 @@ python src/data.py         # 数据管道自测
 > - **标签平滑次之**（+12.2 PPL）：让小数据上的目标分布不那么极端，抑制过拟合。
 > - **dropout 单独影响较小**（+2.4 PPL），但与标签平滑、weight_decay 组合时正则化整体有效（去全部正则 +6.6 PPL）。
 > - 各组件贡献大致可加性成立，说明它们作用于不同的过拟合方面。
+
+### 容量消融（模型宽度，16 epoch）
+
+| d_model | n_layers | 参数量 | best PPL |
+|---|---|---|---|
+| 128 | 4 | 7.1M | 261.1 |
+| 256 | 6 | 16.8M | 201.1 |
+| 512 | 6 | 41.5M | **183.2** |
+
+> **容量结论**：参数量翻倍（7.1M→16.8M→41.5M），PPL 持续下降（261→201→183）。
+> 观察到模型容量增大带来的性能提升（*performance gain with increased model capacity on small corpus*）。
+> 注意 d512 过拟合更严重（best 出现在 epoch 8，后期反弹），大模型需要更强正则。
+
+### Head 数量消融（相同容量 16.8M）
+
+| n_heads | head_dim | best PPL |
+|---|---|---|
+| 4 | 64 | 202.4 |
+| 8 | 32 | 201.1 |
+| 16 | 16 | 201.3 |
+
+> **Head 结论**：相同容量下 head 数量对 PPL 影响很小（201~202），8 头已足够，
+> 多头在小模型上不带来明显收益。
 
 ### 优化历程（从零到最佳）
 
@@ -172,10 +191,6 @@ python src/data.py         # 数据管道自测
 
 ## 🧪 下一步（可选）
 
-- [x] 超参消融实验（seq_len / epoch / batch / lr / 文档拼接 对比 PPL）✅
-- [x] EMA 指数移动平均 ✅
-- [x] 正则化（dropout / 标签平滑 / weight_decay）✅
-- [x] best.pt 验证最优权重保存 ✅
 - [ ] 在 tiny instruction dataset 上做 SFT 微调
 - [ ] d_model / n_layers 容量消融
 
