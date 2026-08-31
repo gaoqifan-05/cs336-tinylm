@@ -96,7 +96,18 @@ python src/data.py         # data pipeline self-test
 
 ## 📊 Results
 
-### Best Config
+This project contains **two tracks of experiments**:
+
+| Track | Model | Purpose | Status |
+|---|---|---|---|
+| **Principle Tests** (Part 1) | 16.8M (d256) / 41.5M (d512) | Verify training principles: ablation, scaling, SFT | ✅ Complete |
+| **GPU Limit Test** (Part 2) | 177M (d1024) | Push this GPU to its limit, best config only | 🔄 Running |
+
+---
+
+### Part 1: Principle Tests (16.8M & 41.5M)
+
+#### Best Config
 
 | Metric | Value |
 |---|---|
@@ -110,11 +121,11 @@ python src/data.py         # data pipeline self-test
 
 > Note: default config is d_model=256 (16.8M, PPL 201.1); capacity ablation found d_model=512 (41.5M) reaches PPL 183.2.
 
-### Training Curves (16ep baseline)
+#### Training Curves (16ep baseline)
 
 ![training curves](assets/baseline_curves.png)
 
-### Ablation (one component at a time)
+#### Ablation (one component at a time)
 
 Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, label_smoothing0.1, wd0.15`
 
@@ -132,7 +143,7 @@ Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, 
 > - **dropout alone small** (+2.4 PPL), but effective when combined with other regularization.
 > - contributions are roughly additive.
 
-### Capacity Ablation (model width, 16 epoch)
+#### Capacity Ablation (model width, 16 epoch)
 
 | d_model | n_layers | Params | best PPL |
 |---|---|---|---|
@@ -142,7 +153,7 @@ Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, 
 
 > **Capacity finding**: more params → lower PPL. Observed *performance gain with increased model capacity on small corpus*. d512 overfits more, needs stronger regularization.
 
-### Head Count Ablation (same capacity 16.8M)
+#### Head Count Ablation (same capacity 16.8M)
 
 | n_heads | head_dim | best PPL |
 |---|---|---|
@@ -152,7 +163,7 @@ Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, 
 
 > **Head finding**: head count barely affects PPL (201~202) at same capacity; 8 heads is sufficient.
 
-### Optimization Journey (from scratch to best)
+#### Optimization Journey (from scratch to best)
 
 | # | Config | PPL | Note |
 |---|---|---|---|
@@ -170,13 +181,13 @@ Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, 
 > 2. **lr + warmup + grad clip**: lr 3e-4→5e-4 combo dropped PPL 287→242.6.
 > 3. **best.pt mechanism**: saves best val weights, avoiding late-overfitting weights hiding the true optimum.
 
-### Supervised Fine-Tuning
+#### Supervised Fine-Tuning
 
 Fine-tune on 100 hand-made English Q&A pairs (geography/history/science/biology) to learn the `Question/Answer` format.
 
 **Core: loss masking** — only the `Answer` part gets loss (the question is input, not to be predicted).
 
-#### Before vs After (16.8M model)
+##### Before vs After (16.8M model)
 
 | Input | Before | After |
 |---|---|---|
@@ -186,7 +197,7 @@ Fine-tune on 100 hand-made English Q&A pairs (geography/history/science/biology)
 > SFT makes the model answer in Q&A format, and the format **generalizes to unseen instructions**.
 > Content hallucination due to limited data — normal for small models.
 
-#### SFT loss & overfitting (16.8M vs 41.5M)
+##### SFT loss & overfitting (16.8M vs 41.5M)
 
 | Model | SFT loss (10ep) | Unseen Q |
 |---|---|---|
@@ -195,7 +206,23 @@ Fine-tune on 100 hand-made English Q&A pairs (geography/history/science/biology)
 
 > **Overfitting finding**: extending 41.5M SFT from 10ep to 16ep dropped loss 0.27→0.035 (memorizing training data), but no improvement on unseen questions and more repetition. **Lower SFT loss ≠ better generalization**; 10ep is enough, 16ep starts overfitting.
 
-### Generation Samples (PPL 201 best model)
+#### Generation Samples (PPL 201 best model)
+
+---
+
+### Part 2: GPU Limit Test (177M d1024)
+
+Pushing the RTX 4060 Laptop (8GB) to its limit with the largest model it can train.
+
+| Metric | Value |
+|---|---|
+| Params | 177.3M |
+| Config | d_model=1024, n_heads=16, n_layers=12, d_ff=2048 |
+| VRAM usage | ~7.3 GB / 8 GB |
+| Training | 16 epochs, batch=8, seq=256 |
+| **Best Val Perplexity** | *pending...* |
+
+> Training in progress (~10 hours). Results will be filled in when complete.
 
 ```
 > The meaning of life is
