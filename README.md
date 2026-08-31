@@ -10,7 +10,7 @@ A small decoder-only Transformer language model built from scratch in PyTorch, i
 - **KV-cache accelerated generation**: caches history K/V during autoregressive inference to avoid recomputation (verified identical to full computation)
 - **Full training pipeline**: mixed-precision AMP, Cosine LR schedule + warmup, Weight decay (AdamW)
 - **SFT fine-tuning**: fine-tuned on 100 instruction pairs, model learns `Question/Answer` format and generalizes to unseen instructions
-- **Reproducible results**: WikiText-2 val perplexity reduced from random 50257 to **183.2** (41.5M model), with training curves and full ablation tables
+- **Reproducible results**: WikiText-2 val perplexity reduced from random 50257 to **201.1** (16.8M model), with training curves and full ablation tables
 
 ---
 
@@ -21,14 +21,13 @@ A small decoder-only Transformer language model built from scratch in PyTorch, i
 - NVIDIA GPU recommended (RTX 3060/4060+, 8GB VRAM)
 
 
-## 🚀 Quick Start
+## 🚀 步骤
 
 ### 1. Prepare data (first time)
 
 The dataset is automatically downloaded and cached in `data/`.
 
 ```bash
-# If auto-download fails, manually download these parquet files to data/:
 #   train-00000-of-00001.parquet  ->  data/train.parquet
 #   validation-00000-of-00001.parquet ->  data/validation.parquet
 python src/data.py  # data pipeline self-test
@@ -37,11 +36,11 @@ python src/data.py  # data pipeline self-test
 ### 2. Training
 
 ```bash
-# Quick smoke test (seconds)
+# Quick smoke test
 python src/train.py --max_steps 30 --epochs 1 --batch_size 4 --seq_len 64 \
     --d_model 64 --n_heads 4 --n_layers 2 --d_ff 128
 
-# Full training (best PPL config: 16ep + regularization + EMA, ~1hr)
+# Full training
 python src/train.py --epochs 16 --batch_size 16 --seq_len 256 \
     --lr 5e-4 --warmup_steps 400 --grad_clip 1.0 \
     --dropout 0.2 --label_smoothing 0.1 --weight_decay 0.15 \
@@ -71,7 +70,7 @@ python src/generate.py --ckpt checkpoints/run_xxx/best.pt --prompt "Once upon a 
 python src/generate.py --prompt "Once upon a time" --top_k 50 --temperature 0.8
 ```
 
-### 4. SFT Fine-tuning (optional)
+### 4. SFT Fine-tuning
 
 ```bash
 # Generate instruction data (100 English Q&A)
@@ -100,26 +99,24 @@ This project contains **two tracks of experiments**:
 
 | Track | Model | Purpose | Status |
 |---|---|---|---|
-| **Principle Tests** (Part 1) | 16.8M (d256) / 41.5M (d512) | Verify training principles: ablation, scaling, SFT | ✅ Complete |
+| **Principle Tests** (Part 1) | 16.8M (d256) | Verify training principles: ablation, scaling, SFT | ✅ Complete |
 | **GPU Limit Test** (Part 2) | 177M (d1024) | Push this GPU to its limit, best config only | 🔄 Running |
 
 ---
 
-### Part 1: Principle Tests (16.8M & 41.5M)
+### Part 1: Principle Tests (16.8M)
 
 #### Best Config
 
 | Metric | Value |
 |---|---|
-| Params | 16.8M (d256) / 41.5M (d512) |
+| Params | 16.8M (d256) |
 | Vocab (BPE) | 50,257 |
 | Train tokens | 2.2M |
 | Val tokens | 238K |
 | Best train loss | ~4.69 |
-| **Best Val Perplexity** | **183.2** (d512, best.pt; random init = 50257) |
+| **Best Val Perplexity** | **201.1** (best.pt; random init = 50257) |
 | Device | RTX 4060 Laptop (8GB) |
-
-> Note: default config is d_model=256 (16.8M, PPL 201.1); capacity ablation found d_model=512 (41.5M) reaches PPL 183.2.
 
 #### Training Curves (16ep baseline)
 
@@ -148,10 +145,9 @@ Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, 
 | d_model | n_layers | Params | best PPL |
 |---|---|---|---|
 | 128 | 4 | 7.1M | 261.1 |
-| 256 | 6 | 16.8M | 201.1 |
-| 512 | 6 | 41.5M | **183.2** |
+| 256 | 6 | 16.8M | **201.1** |
 
-> **Capacity finding**: more params → lower PPL. Observed *performance gain with increased model capacity on small corpus*. d512 overfits more, needs stronger regularization.
+> **Capacity finding**: more params → lower PPL. Observed *performance gain with increased model capacity on small corpus*. Larger models (41.5M d512, 177M d1024) are explored in Part 2.
 
 #### Head Count Ablation (same capacity 16.8M)
 
@@ -197,14 +193,13 @@ Fine-tune on 100 hand-made English Q&A pairs (geography/history/science/biology)
 > SFT makes the model answer in Q&A format, and the format **generalizes to unseen instructions**.
 > Content hallucination due to limited data — normal for small models.
 
-##### SFT loss & overfitting (16.8M vs 41.5M)
+##### SFT loss & overfitting (16.8M)
 
 | Model | SFT loss (10ep) | Unseen Q |
 |---|---|---|
 | 16.8M | 1.39 | format correct |
-| 41.5M | 0.27 | format correct; more accurate on trained Q |
 
-> **Overfitting finding**: extending 41.5M SFT from 10ep to 16ep dropped loss 0.27→0.035 (memorizing training data), but no improvement on unseen questions and more repetition. **Lower SFT loss ≠ better generalization**; 10ep is enough, 16ep starts overfitting.
+> **Observation**: SFT loss can be driven very low (memorizing training data) without improving unseen questions. **Lower SFT loss ≠ better generalization**; 10 epochs is enough for format learning.
 
 #### Generation Samples (PPL 201 best model)
 
