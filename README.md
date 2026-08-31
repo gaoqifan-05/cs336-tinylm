@@ -145,8 +145,8 @@ Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, 
 | d_model | n_layers | Params | best PPL |
 |---|---|---|---|
 | 128 | 4 | 7.1M | 261.1 |
-| 256 | 6 | 16.8M | **201.1** |
-| 512 | 6 | 41.5M | 183.2 |
+| 256 | 6 | 16.8M | 201.1 |
+| 512 | 6 | 41.5M | **183.2** |
 
 > **Capacity finding**: more params → lower PPL. Observed *performance gain with increased model capacity on small corpus*. Larger model (177M d1024) is explored in Part 2.
 
@@ -155,7 +155,7 @@ Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, 
 | n_heads | head_dim | best PPL |
 |---|---|---|
 | 4 | 64 | 202.4 |
-| 8 | 32 | 201.1 |
+| 8 | 32 | **201.1** |
 | 16 | 16 | 201.3 |
 
 > **Head finding**: head count barely affects PPL (201~202) at same capacity; 8 heads is sufficient.
