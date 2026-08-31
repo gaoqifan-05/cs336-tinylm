@@ -146,8 +146,9 @@ Baseline: `16ep, bs16, seq256, lr5e-4, warm400, gradclip, EMA0.999, dropout0.2, 
 |---|---|---|---|
 | 128 | 4 | 7.1M | 261.1 |
 | 256 | 6 | 16.8M | **201.1** |
+| 512 | 6 | 41.5M | 183.2 |
 
-> **Capacity finding**: more params → lower PPL. Observed *performance gain with increased model capacity on small corpus*. Larger models (41.5M d512, 177M d1024) are explored in Part 2.
+> **Capacity finding**: more params → lower PPL. Observed *performance gain with increased model capacity on small corpus*. Larger model (177M d1024) is explored in Part 2.
 
 #### Head Count Ablation (same capacity 16.8M)
 
