@@ -7,6 +7,7 @@
 - **手写核心组件**：RMSNorm、RoPE 旋转位置编码、Multi-Head Attention（带 KV-cache）、SwiGLU FFN、Weight Tying
 - **KV-cache 加速生成**：逐 token 自回归推理时缓存历史 K/V，避免重复计算（冒烟测试已证明与全量计算一致）
 - **完整训练管线**：混合精度 AMP、Cosine LR schedule + warmup、Weight decay（AdamW）
+- **SFT 监督微调**：用 100 条指令数据微调，模型学会 `Question/Answer` 问答格式并泛化到未见指令
 - **可复现结果**：WikiText-2 验证集 perplexity 从随机 50257 降至 **183.2**（41.5M 模型），附训练曲线与完整消融对比表
 
 ## 📦 环境要求
@@ -58,7 +59,23 @@ python src/generate.py --ckpt checkpoints/run_xxx/best.pt --prompt "Once upon a 
 python src/generate.py --prompt "Once upon a time" --top_k 50 --temperature 0.8
 ```
 
-### 4. 运行测试
+### 4. SFT 监督微调（可选）
+
+```bash
+# 生成指令数据（100 条英文问答）
+python src/make_sft_data.py
+
+# 在预训练 best model 上微调（loss masking 只对答案算 loss）
+python src/sft.py --pretrained checkpoints/best_model.pt --epochs 10 --lr 1e-4
+
+# 测试微调效果（问它问题）
+python src/generate.py --ckpt checkpoints/sft/run_xxx/sft_model.pt --prompt "Question: What is the capital of France?\nAnswer:" \
+    --top_k 50 --temperature 0.7 --repetition_penalty 1.2
+```
+
+> 提示：小模型生成易重复，用 `--repetition_penalty 1.2` 抑制重复循环。
+
+### 5. 运行测试
 
 ```bash
 python src/smoke_test.py   # 模型前向/反向/KV-cache 一致性验证
@@ -145,6 +162,33 @@ python src/data.py         # 数据管道自测
 > 3. **best.pt 机制**：保存验证集最优权重，避免过拟合后期权重（235）掩盖真正最优（201.1）。
 > 4. **文档级拼接在本数据集上无益**：WikiText-2 是维基片段，行间语义本就弱关联。
 
+### SFT 监督微调（Supervised Fine-Tuning）
+
+在预训练基础上，用 100 条自制的英文问答对（地理/历史/科学/生物等百科主题）微调，让模型学会 `Question/Answer` 问答格式。
+
+**核心：loss masking** —— 只对 `Answer` 部分计算 loss（问题是输入，不该被预测）。
+
+#### 微调前后对比（16.8M 模型）
+
+| 输入 | 微调前 | 微调后 |
+|---|---|---|
+| `Question: What is the capital of France?` | 无意义续写 `"the most great @-@ great..."` | `The capital of France is Paris.` ✅ |
+| `Question: What is the capital of Germany?`（未见）| — | `The capital of Germany is Paris.`（格式正确，内容幻觉）|
+
+> SFT 让模型从"自由续写"变为"按问答格式回答"，且**格式能泛化到未见过的指令**。
+> 内容层面的幻觉是因为 100 条数据太少、模型未见过这些地名 —— 属于小模型 + 小数据的正常局限。
+
+#### SFT loss 与过拟合（16.8M vs 41.5M）
+
+| 模型 | SFT loss (10ep) | 对未见问题 |
+|---|---|---|
+| 16.8M | 1.39 | 格式正确 |
+| 41.5M | 0.27 | 格式正确（对训练过的问题答得更准）|
+
+> **过拟合观察**：把 41.5M 的 SFT 从 10ep 加到 16ep，loss 从 0.27 降到 0.035（背熟训练数据），
+> 但对**未见问题**的回答没有改善、重复反而更多。**SFT 训练 loss 低 ≠ 泛化好**，
+> 10ep 已足够学会格式，16ep 开始过拟合 —— 体现了训练 loss 与泛化能力的权衡。
+
 ### 生成示例（PPL 201 最佳模型）
 
 ```
@@ -173,11 +217,13 @@ python src/data.py         # 数据管道自测
 │   ├── tokenizer.py    # BPE 分词器（GPT-2 风格 ByteLevel）
 │   ├── data.py         # WikiText-2 数据管道
 │   ├── train.py        # 预训练脚本（AMP + cosine LR + weight decay + EMA + best.pt）
-│   ├── generate.py     # KV-cache 文本生成（greedy / top-k）
+│   ├── generate.py     # KV-cache 文本生成（greedy / top-k / repetition penalty）
 │   ├── evaluate.py     # 验证集/测试集 PPL 评估
+│   ├── sft.py          # SFT 监督微调（loss masking）
+│   ├── make_sft_data.py # 生成 SFT 指令数据
 │   ├── smoke_test.py   # 模型正确性冒烟测试
 ├── assets/             # 训练曲线图（README 引用）
-├── data/               # 数据集 + 分词器（gitignore）
+├── data/               # 数据集 + 分词器 + SFT 数据（gitignore）
 ├── checkpoints/        # 模型权重，按 run_时间戳_配置 分目录（gitignore）
 ├── outputs/            # 训练曲线，与 checkpoints 对应（gitignore）
 └── requirements.txt
