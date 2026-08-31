@@ -151,11 +151,19 @@ python src/data.py         # 数据管道自测
 > The meaning of life is
  The meaning of life is a species which can be used as a variety of
  different species . The species has been described by the species .
+
+> In the beginning
+ In the beginning of this period , Wheeler played a role with the club
+ in a British professional football game , a professional club record
+ of four matches . In 2008 , he signed with the First Division Player
+ of the Year to a 2 – 1 lead in a five @-@ year contract . In early
+ 2013 , he was named the league 's highest appearance in the Division
+ I 'll be known for the Conference , which would be
 ```
 
 > 17M 小模型在 WikiText-2 上训练后已能产出**结构完整、语法通顺**的英文句子
-> （含主从句、定语从句、介词短语），内容层面存在重复与无意义 —— 小模型 +
-> 小数据的正常表现。从 PPL 343 → 201 的优化过程中，生成质量同步明显提升。
+> （含主从句、定语从句、介词短语、年份数字），内容层面存在重复与无意义 ——
+> 小模型 + 小数据的正常表现。从 PPL 343 → 201 的优化过程中，生成质量同步明显提升。
 
 ## 📁 项目结构
 
