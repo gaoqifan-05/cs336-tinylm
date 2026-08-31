@@ -60,6 +60,8 @@ def parse_args():
                    help="从指定 checkpoint 热启动（加载模型权重继续训练）")
     p.add_argument("--fine_tune", type=float, default=0.0,
                    help="精修模式：用此固定小 LR 训练（如 1e-5），不用 warmup/cosine")
+    p.add_argument("--tb", action="store_true",
+                   help="启用 TensorBoard 实时监控（logs 写到 outputs/runs/）")
     return p.parse_args()
 
 
@@ -240,6 +242,14 @@ def main():
     os.makedirs(run_ckpt_dir, exist_ok=True)
     print(f"实验目录: {run_name}")
 
+    # 可选：TensorBoard 实时监控
+    tb_writer = None
+    if args.tb:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_log_dir = os.path.join(args.out_dir, "runs", run_name)
+        tb_writer = SummaryWriter(log_dir=tb_log_dir)
+        print(f"TensorBoard 日志: {tb_log_dir}")
+
     print("\n开始训练...")
     global_step = 0
     best_ppl = float("inf")   # 最佳验证 PPL（用于保存 best.pt）
@@ -283,6 +293,11 @@ def main():
             train_losses.append(loss.item())
             lrs.append(scheduler.get_last_lr()[0])
 
+            # TensorBoard 记录（loss / lr 每步）
+            if tb_writer is not None:
+                tb_writer.add_scalar("train/loss", loss.item(), global_step)
+                tb_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], global_step)
+
             if global_step % args.log_every == 0:
                 print(f"[epoch {epoch+1}/{args.epochs}] step {global_step} | "
                       f"loss {loss.item():.4f} | lr {scheduler.get_last_lr()[0]:.2e}")
@@ -297,6 +312,11 @@ def main():
                     val_loss, val_ppl = evaluate(model, val_loader, device)
                 val_ppls.append((global_step, val_ppl))
                 print(f"  → 验证 loss {val_loss:.4f} | PPL {val_ppl:.2f}")
+
+                # TensorBoard 记录验证 PPL / loss
+                if tb_writer is not None:
+                    tb_writer.add_scalar("val/loss", val_loss, global_step)
+                    tb_writer.add_scalar("val/ppl", val_ppl, global_step)
 
                 # 保存检查点（带步数，多个检查点共存）
                 ckpt_path = os.path.join(run_ckpt_dir, f"step_{global_step}.pt")
@@ -325,6 +345,10 @@ def main():
                     print(f"    ★ 新最佳 PPL {val_ppl:.2f}，已保存 {best_path}")
 
             global_step += 1
+
+    # 关闭 TensorBoard writer
+    if tb_writer is not None:
+        tb_writer.close()
 
     # 6. 保存最终模型 + 曲线数据（用 EMA 权重，泛化更好）
     ema.apply_shadow(model)
