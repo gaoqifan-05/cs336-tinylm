@@ -32,6 +32,7 @@ def generate(
     max_new_tokens: int = 100,
     top_k: int = None,
     temperature: float = 1.0,
+    repetition_penalty: float = 1.0,
     device: str = "cuda",
 ):
     """用 KV-cache 逐 token 生成文本，返回完整文本"""
@@ -57,7 +58,15 @@ def generate(
         logits, past_kvs = model(x, past_kvs)          # 每步只输入 1 个新 token
         logits = logits[:, -1, :] / temperature        # 最后位置，除以温度控制多样性
 
-        # 3. 采样策略
+        # 3. repetition penalty：对已生成过的 token 打折扣，抑制重复循环
+        if repetition_penalty != 1.0:
+            for pid in generated:
+                if logits[0, pid] > 0:
+                    logits[0, pid] /= repetition_penalty
+                else:
+                    logits[0, pid] *= repetition_penalty
+
+        # 4. 采样策略
         if top_k is not None:
             # top-k：只保留概率最高的 k 个
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -109,6 +118,8 @@ def parse_args():
     p.add_argument("--max_new_tokens", type=int, default=100)
     p.add_argument("--top_k", type=int, default=None, help="top-k 采样；None 表示 greedy")
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--repetition_penalty", type=float, default=1.0,
+                   help="重复惩罚（>1 抑制重复，如 1.2）；1.0 表示关闭")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
@@ -137,6 +148,7 @@ if __name__ == "__main__":
         max_new_tokens=args.max_new_tokens,
         top_k=args.top_k,
         temperature=args.temperature,
+        repetition_penalty=args.repetition_penalty,
         device=device,
     )
     print("\n" + "=" * 60)
