@@ -22,7 +22,7 @@ A small decoder-only Transformer language model built from scratch in PyTorch, i
 - NVIDIA GPU recommended (RTX 3060/4060+, 8GB VRAM)
 
 
-## 🚀 步骤
+## 🚀 Procedure
 
 ### 1. Prepare data (first time)
 
