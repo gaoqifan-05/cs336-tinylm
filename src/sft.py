@@ -28,20 +28,26 @@ from src.model import DecoderOnlyLM
 from src.data import TOKENIZER_PATH
 from src.tokenizer import load_tokenizer
 
-# 预训练好的起点模型
-PRETRAINED = "checkpoints/best_model.pt"
-SFT_DATA_PATH = "data/sft_data.json"
+# 预训练好的起点模型（wt103 续跑后的最优模型，PPL 89.87）
+PRETRAINED = "checkpoints/run_20260901_110553_wt103_blk1_d1024_bs12_cont_256seq_1ep/best.pt"
+TOKENIZER_WT103 = "data/tokenizer_wt103.json"
+SFT_DATA_PATH = "data/sft_data_alpaca10k.json"
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--pretrained", type=str, default=PRETRAINED, help="预训练模型路径")
-    p.add_argument("--epochs", type=int, default=10, help="微调轮数")
+    p.add_argument("--tokenizer", type=str, default=TOKENIZER_WT103,
+                   help="tokenizer json 路径（wt103 模型需用 tokenizer_wt103.json）")
+    p.add_argument("--data", type=str, default=SFT_DATA_PATH, help="SFT 指令数据 JSON 路径")
+    p.add_argument("--epochs", type=int, default=3, help="微调轮数")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--lr", type=float, default=1e-4, help="微调学习率（小，避免破坏预训练知识）")
     p.add_argument("--seq_len", type=int, default=256)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--log_every", type=int, default=200,
+                   help="每多少 batch 打印一次进度")
     p.add_argument("--out_dir", type=str, default="checkpoints/sft")
     return p.parse_args()
 
@@ -62,8 +68,11 @@ def tokenize_example(tokenizer, ex):
         mask: 与 ids 等长，1 表示"该位置要算 loss"（即 Answer 部分），0 表示忽略
     """
     # 格式化："Question: ...\nAnswer: ..."
-    # 注意：Answer 后面要留出"预测答案"的空间，用 EOS 结尾
-    question = f"Question: {ex['instruction']}\nAnswer:"
+    # Alpaca 的 input 字段作为额外上下文拼进 Question
+    question = f"Question: {ex['instruction']}"
+    if ex.get("input"):
+        question += f"\nContext: {ex['input']}"
+    question += "\nAnswer:"
     answer = f" {ex['response']}"
 
     q_ids = tokenizer.encode(question).ids
@@ -147,8 +156,8 @@ def main():
     print(f"已加载预训练模型: {args.pretrained} ({model.param_count()/1e6:.2f}M, PPL {ckpt.get('val_ppl', '?')})")
 
     # 2. 加载 tokenizer + SFT 数据
-    tokenizer = load_tokenizer(TOKENIZER_PATH)
-    data = load_sft_data(SFT_DATA_PATH)
+    tokenizer = load_tokenizer(args.tokenizer)
+    data = load_sft_data(args.data)
     print(f"加载 {len(data)} 条 SFT 指令")
 
     # 3. tokenize（每条 → ids + answer mask）
@@ -175,6 +184,7 @@ def main():
         # 打乱数据
         indices = torch.randperm(len(examples))
         epoch_loss = 0.0
+        t0 = time.time()
         for i in range(n_batches):
             batch_idx = indices[i * args.batch_size: (i + 1) * args.batch_size]
             batch = [examples[j] for j in batch_idx]
@@ -182,8 +192,22 @@ def main():
             loss = train_step(model, x, y, mask, optimizer, scaler, args, device)
             epoch_loss += loss
 
+            # 进度显示：每 log_every 个 batch 打印一次
+            if (i + 1) % args.log_every == 0:
+                avg_so_far = epoch_loss / (i + 1)
+                elapsed = time.time() - t0
+                pct = (i + 1) / n_batches * 100
+                speed = (i + 1) / elapsed
+                remain = (n_batches - i - 1) / speed
+                print(f"[epoch {epoch+1}/{args.epochs}] "
+                      f"batch {i+1}/{n_batches} ({pct:.0f}%) | "
+                      f"loss {avg_so_far:.4f} | "
+                      f"{speed:.1f} batch/s | "
+                      f"已用 {elapsed:.0f}s 剩余~{remain:.0f}s", flush=True)
+
         avg = epoch_loss / n_batches
-        print(f"[epoch {epoch+1}/{args.epochs}] loss {avg:.4f}")
+        print(f"[epoch {epoch+1}/{args.epochs}] 完成 | 平均 loss {avg:.4f} | "
+              f"用时 {time.time()-t0:.0f}s", flush=True)
 
     # 6. 保存微调后的模型
     out_path = os.path.join(run_dir, "sft_model.pt")

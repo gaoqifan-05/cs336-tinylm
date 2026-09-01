@@ -62,6 +62,16 @@ def parse_args():
                    help="精修模式：用此固定小 LR 训练（如 1e-5），不用 warmup/cosine")
     p.add_argument("--tb", action="store_true",
                    help="启用 TensorBoard 实时监控（logs 写到 outputs/runs/）")
+    p.add_argument("--dataset", type=str, default="wikitext2",
+                   choices=["wikitext2", "wikitext103"],
+                   help="数据集：wikitext2（默认）或 wikitext103")
+    p.add_argument("--subset_ratio", type=float, default=1.0,
+                   help="wikitext103 时取多少比例训练数据（1.0=全量，0.1=10%）")
+    p.add_argument("--subset_mode", type=str, default="first",
+                   choices=["first", "random", "block"],
+                   help="wikitext103 子集采样方式：first=前N%% | random=随机N%% | block=取第N块")
+    p.add_argument("--subset_index", type=int, default=0,
+                   help="block 模式取第几块（从0开始，如 subset_ratio=0.1, index=1 → 取10%%~20%%）")
     return p.parse_args()
 
 
@@ -170,7 +180,10 @@ def main():
 
     # 1. 数据
     train_loader, val_loader, tokenizer = get_dataloaders(
-        batch_size=args.batch_size, seq_len=args.seq_len
+        batch_size=args.batch_size, seq_len=args.seq_len,
+        dataset=args.dataset, subset_ratio=args.subset_ratio,
+        subset_mode=args.subset_mode, subset_index=args.subset_index,
+        seed=args.seed,
     )
     vocab_size = tokenizer.get_vocab_size()
     print(f"词表大小: {vocab_size}")

@@ -91,68 +91,98 @@ def _download_wikitext2() -> dict:
     return result
 
 
-def _build_or_load_tokenizer():
-    """优先加载已有的 tokenizer.json，否则用 WikiText-2 训练"""
+def _load_wikitext103(subset_ratio: float = 1.0, subset_mode: str = "first", subset_index: int = 0, seed: int = 42) -> dict:
+    """从本地读取 WikiText-103 分片 parquet，返回 {'train': [...], 'validation': [...], 'test': [...]}
+
+    subset_ratio: 取多少比例的训练数据（1.0=全量）
+    subset_mode:  子集采样方式
+        - "first"  取前 subset_ratio 比例（默认，向后兼容）
+        - "random" 随机均匀采样 subset_ratio 比例（固定 seed 可复现）
+        - "block"  取第 subset_index 个等宽分块（如 subset_ratio=0.1, index=1 → 取 10%~20% 这段）
+    subset_index: block 模式下取第几块（从 0 开始）
+    seed:         random 模式的随机种子
+    """
+    import pandas as pd
+    import random
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    result = {}
+
+    # 训练集：两个分片
+    train_files = sorted([
+        os.path.join(DATA_DIR, f) for f in os.listdir(DATA_DIR)
+        if f.startswith("wt103_train") and f.endswith(".parquet")
+    ])
+    if not train_files:
+        raise FileNotFoundError("未找到 WikiText-103 训练分片，请先下载 wt103_train-*.parquet 到 data/")
+
+    train_lines = []
+    for f in train_files:
+        df = pd.read_parquet(f)
+        train_lines.extend([t for t in df["text"].tolist() if t.strip()])
+    # 取子集（按指定方式）
+    if subset_ratio < 1.0:
+        n_total = len(train_lines)
+        n = int(n_total * subset_ratio)
+        if subset_mode == "random":
+            rng = random.Random(seed)
+            train_lines = rng.sample(train_lines, n)
+            print(f"[data] 使用训练子集: 随机 {subset_ratio*100:.0f}% = {n} 行 (seed={seed})")
+        elif subset_mode == "block":
+            start = int(n_total * subset_ratio * subset_index)
+            end = int(n_total * subset_ratio * (subset_index + 1))
+            train_lines = train_lines[start:end]
+            pct_lo = subset_ratio * subset_index * 100
+            pct_hi = subset_ratio * (subset_index + 1) * 100
+            print(f"[data] 使用训练子集: 第{subset_index}块 [{pct_lo:.0f}%~{pct_hi:.0f}%] = {len(train_lines)} 行")
+        else:  # first
+            train_lines = train_lines[:n]
+            print(f"[data] 使用训练子集: 前 {subset_ratio*100:.0f}% = {n} 行")
+    result["train"] = train_lines
+    print(f"[data] WikiText-103 训练行数: {len(train_lines)}")
+
+    # 验证/测试：单文件
+    for split, key in [("validation", "validation"), ("test", "test")]:
+        local = os.path.join(DATA_DIR, f"wt103_{split}.parquet")
+        if not os.path.exists(local):
+            print(f"[data] 警告: 未找到 {local}，跳过 {split}")
+            result[key] = []
+            continue
+        df = pd.read_parquet(local)
+        lines = [t for t in df["text"].tolist() if t.strip()]
+        result[key] = lines
+        print(f"[data] WikiText-103 {split} 行数: {len(lines)}")
+
+    return result
+
+
+def _build_or_load_tokenizer(dataset: str = "wikitext2"):
+    """优先加载已有的 tokenizer，否则用对应数据集训练"""
     if os.path.exists(TOKENIZER_PATH):
         print(f"[data] 加载已存在的分词器: {TOKENIZER_PATH}")
         return load_tokenizer(TOKENIZER_PATH)
 
-    print("[data] 未找到分词器，开始训练（用 WikiText-2 训练集）...")
+    print(f"[data] 未找到分词器，开始训练（用 {dataset} 训练集）...")
     from src.tokenizer import train_tokenizer
-    texts = _download_wikitext2()["train"]
+    if dataset == "wikitext103":
+        texts = _load_wikitext103()["train"]
+    else:
+        texts = _download_wikitext2()["train"]
     return train_tokenizer(texts, TOKENIZER_PATH)
 
 
-def _group_into_docs(lines: List[str], eos_id: int, tokenizer) -> List[int]:
-    """
-    文档级拼接：把连续的文本行按空行分成"文档"，
-    同一文档内的行串成一个连续序列（不加 EOS），只在文档边界加 EOS。
-
-    对比旧的"逐行加 EOS"方式，好处是块内上下文连贯，
-    减少"每行开头无前文可依赖"导致的无效预测。
-
-    返回: 拼好的 token id 列表
-    """
-    ids = []
-    current_doc = []  # 当前文档的 token
-
-    for line in lines:
-        if line.strip():
-            current_doc.extend(tokenizer.encode(line.strip()).ids)
-        else:
-            # 空行 = 段落分隔。如果当前文档非空，则在此收尾（加 EOS）
-            if current_doc:
-                current_doc.append(eos_id)
-                ids.extend(current_doc)
-                current_doc = []
-
-    # 处理最后一段没有空行结尾的文档
-    if current_doc:
-        current_doc.append(eos_id)
-        ids.extend(current_doc)
-
-    return ids
-
-
-def _tokenize_and_cache(split_lines: List[str], cache_path: str, tokenizer,
-                        use_doc_concat: bool = False) -> List[int]:
-    """把文本行 tokenize 成 id 列表；若已缓存则直接加载"""
+def _tokenize_and_cache(split_lines: List[str], cache_path: str, tokenizer) -> List[int]:
+    """把文本行 tokenize 成 id 列表（逐行拼接，每行之间加 EOS）；若已缓存则直接加载"""
     if os.path.exists(cache_path):
         print(f"[data] 加载缓存: {cache_path}")
         return torch.load(cache_path, weights_only=True).tolist()
 
-    mode = "文档级拼接" if use_doc_concat else "逐行拼接"
-    print(f"[data] tokenize {len(split_lines)} 行文本（{mode}）...")
+    print(f"[data] tokenize {len(split_lines)} 行文本（逐行拼接）...")
     eos_id = tokenizer.token_to_id("<|endoftext|>")
-
-    if use_doc_concat:
-        ids = _group_into_docs(split_lines, eos_id, tokenizer)
-    else:
-        # 逐行拼接：每行之间加 EOS（GPT-2 经典做法，实测在本数据集上更优）
-        ids = []
-        for line in split_lines:
-            ids.extend(tokenizer.encode(line).ids)
-            ids.append(eos_id)
+    ids = []
+    for line in split_lines:
+        ids.extend(tokenizer.encode(line).ids)
+        ids.append(eos_id)  # 每行之间加 EOS（GPT-2 经典做法；文档级拼接实测无益）
 
     torch.save(torch.tensor(ids), cache_path)
     print(f"[data] 共 {len(ids)} 个 token，已缓存到 {cache_path}")
@@ -165,8 +195,12 @@ def get_dataloaders(
     tokenizer_path: str = TOKENIZER_PATH,
     data_dir: str = DATA_DIR,
     force_retokenize: bool = False,
-    use_doc_concat: bool = False,
     include_test: bool = False,
+    dataset: str = "wikitext2",
+    subset_ratio: float = 1.0,
+    subset_mode: str = "first",
+    subset_index: int = 0,
+    seed: int = 42,
 ):
     """
     返回 (train_loader, val_loader, tokenizer)；
@@ -176,17 +210,32 @@ def get_dataloaders(
         batch_size:       每个 batch 的序列数
         seq_len:          序列长度（= max_seq_len）
         force_retokenize: 强制重新下载/分词（用于换数据集或重训分词器）
-        use_doc_concat:   True=文档级拼接；False=逐行拼接（默认，实测更优）
         include_test:     True=同时加载 test split（用于最终评估）
+        dataset:          "wikitext2"（默认）或 "wikitext103"
+        subset_ratio:     wikitext103 时取多少比例训练数据（1.0=全量）
+        subset_mode:      "first"=前N%（默认）| "random"=随机N% | "block"=第N块
+        subset_index:     block 模式取第几块（从0开始）
+        seed:             random 模式的随机种子
     """
     global TOKENIZER_PATH, DATA_DIR, TRAIN_CACHE, VAL_CACHE
     TOKENIZER_PATH = tokenizer_path
     DATA_DIR = data_dir
-    # 两种模式用不同的缓存文件，避免互相覆盖
-    suffix = "_doc" if use_doc_concat else ""
+    # 数据集 + 子集比例 + 采样方式 用不同的缓存文件，避免互相覆盖
+    suffix = f"_{dataset}" if dataset != "wikitext2" else ""
+    if subset_ratio < 1.0:
+        suffix += f"_{int(subset_ratio*100)}pct"
+        if subset_mode == "random":
+            suffix += f"_rand{seed}"
+        elif subset_mode == "block":
+            suffix += f"_blk{subset_index}"
+        # first 模式保持旧命名（向后兼容）
     TRAIN_CACHE = os.path.join(data_dir, f"train_ids{suffix}.pt")
     VAL_CACHE = os.path.join(data_dir, f"val_ids{suffix}.pt")
     TEST_CACHE = os.path.join(data_dir, f"test_ids{suffix}.pt")
+    # tokenizer 也区分数据集（103 用独立 tokenizer）
+    tok_path = TOKENIZER_PATH if dataset == "wikitext2" else \
+        os.path.join(data_dir, "tokenizer_wt103.json")
+    TOKENIZER_PATH = tok_path
 
     # 如果强制重建，先清掉缓存
     if force_retokenize:
@@ -196,7 +245,7 @@ def get_dataloaders(
                 print(f"[data] 已删除缓存 {p}")
 
     # 1. 分词器（存在则加载，不存在则训练）
-    tokenizer = _build_or_load_tokenizer()
+    tokenizer = _build_or_load_tokenizer(dataset)
     vocab_size = tokenizer.get_vocab_size()
 
     # 2. 文本 → token id（带缓存）
@@ -204,12 +253,15 @@ def get_dataloaders(
                      or not os.path.exists(VAL_CACHE)
                      or (include_test and not os.path.exists(TEST_CACHE)))
     if need_download:
-        texts = _download_wikitext2()
+        if dataset == "wikitext103":
+            texts = _load_wikitext103(subset_ratio, subset_mode, subset_index, seed)
+        else:
+            texts = _download_wikitext2()
     else:
         texts = {"train": [], "validation": [], "test": []}
 
-    train_ids = _tokenize_and_cache(texts["train"], TRAIN_CACHE, tokenizer, use_doc_concat)
-    val_ids = _tokenize_and_cache(texts["validation"], VAL_CACHE, tokenizer, use_doc_concat)
+    train_ids = _tokenize_and_cache(texts["train"], TRAIN_CACHE, tokenizer)
+    val_ids = _tokenize_and_cache(texts["validation"], VAL_CACHE, tokenizer)
 
     # 3. 构建 Dataset + DataLoader
     train_ds = TokenDataset(train_ids, seq_len)
@@ -228,7 +280,7 @@ def get_dataloaders(
 
     # 可选：test split（最终评估用）
     if include_test:
-        test_ids = _tokenize_and_cache(texts["test"], TEST_CACHE, tokenizer, use_doc_concat)
+        test_ids = _tokenize_and_cache(texts["test"], TEST_CACHE, tokenizer)
         test_ds = TokenDataset(test_ids, seq_len)
         test_loader = DataLoader(
             test_ds, batch_size=batch_size, shuffle=False, num_workers=0,

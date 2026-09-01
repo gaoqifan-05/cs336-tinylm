@@ -114,6 +114,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", type=str, default=None,
                    help="模型权重路径；默认自动选最新的实验目录")
+    p.add_argument("--tokenizer", type=str, default=None,
+                   help="tokenizer json 路径；默认用 data/tokenizer.json（wikitext2）。\n"
+                        "wt103 模型需指定 data/tokenizer_wt103.json")
     p.add_argument("--prompt", type=str, default="The meaning of life is", help="生成起始文本")
     p.add_argument("--max_new_tokens", type=int, default=100)
     p.add_argument("--top_k", type=int, default=None, help="top-k 采样；None 表示 greedy")
@@ -134,7 +137,8 @@ if __name__ == "__main__":
         args.ckpt = find_latest_ckpt()
 
     # 加载分词器 + 模型
-    tokenizer = load_tokenizer(TOKENIZER_PATH)
+    tok_path = args.tokenizer or TOKENIZER_PATH
+    tokenizer = load_tokenizer(tok_path)
     ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
     cfg = ckpt["config"]
     model = DecoderOnlyLM(cfg).to(device)

@@ -1,6 +1,6 @@
 # Tiny Decoder-Only Language Model (from scratch)
 
-A small decoder-only Transformer language model built from scratch in PyTorch, inspired by Stanford **CS336: Language Modeling from Scratch**. All core components are hand-implemented. Pre-trained on WikiText-2 and fine-tuned with SFT. Reproducible on a single consumer GPU (RTX 4060).
+A small decoder-only Transformer language model built from scratch in PyTorch, inspired by Stanford **CS336: Language Modeling from Scratch**. All core components are hand-implemented. Pre-trained on WikiText-103 (177M model) and fine-tuned with SFT. Reproducible on a single consumer GPU (RTX 4060).
 
 ---
 
@@ -9,8 +9,9 @@ A small decoder-only Transformer language model built from scratch in PyTorch, i
 - **Hand-written core components**: RMSNorm, RoPE rotary positional embedding, Multi-Head Attention (with KV-cache), SwiGLU FFN, Weight Tying
 - **KV-cache accelerated generation**: caches history K/V during autoregressive inference to avoid recomputation (verified identical to full computation)
 - **Full training pipeline**: mixed-precision AMP, Cosine LR schedule + warmup, Weight decay (AdamW)
-- **SFT fine-tuning**: fine-tuned on 100 instruction pairs, model learns `Question/Answer` format and generalizes to unseen instructions
-- **Reproducible results**: WikiText-2 val perplexity reduced from random 50257 to **201.1** (16.8M model), with training curves and full ablation tables
+- **Incremental data-block training**: instead of overfitting one fixed 10% slice, the model is trained on successive WikiText-103 blocks (first 10% → second 10%), improving generalization
+- **SFT fine-tuning**: fine-tuned on the full 52K [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca) instruction set (loss masking), model learns `Question/Answer` format, numbered-list & paragraph responses, and generalizes to unseen instructions
+- **Reproducible results**: WikiText-103 val perplexity reduced from random 50257 to **89.87** (177M model), with training curves and full ablation tables
 
 ---
 
@@ -73,14 +74,24 @@ python src/generate.py --prompt "Once upon a time" --top_k 50 --temperature 0.8
 ### 4. SFT Fine-tuning
 
 ```bash
-# Generate instruction data (100 English Q&A)
-python src/make_sft_data.py
+# Download & convert Alpaca instructions (default 10K, use --n 52000 for full set)
+python scripts/make_alpaca_sft.py --n 52000 --out data/sft_data_alpaca_full.json
 
 # Fine-tune on pretrained best model (loss masking: only answer part gets loss)
-python src/sft.py --pretrained checkpoints/best_model.pt --epochs 10 --lr 1e-4
+#   wt103 model → must pass tokenizer_wt103.json
+python src/sft.py --pretrained checkpoints/run_xxx/best.pt \
+    --tokenizer data/tokenizer_wt103.json \
+    --data data/sft_data_alpaca10k.json --epochs 3 --lr 1e-4
+
+# Continue with full 52K set
+python src/sft.py --pretrained checkpoints/sft/run_xxx/sft_model.pt \
+    --tokenizer data/tokenizer_wt103.json \
+    --data data/sft_data_alpaca_full.json --epochs 2 --lr 1e-4 --log_every 500
 
 # Test fine-tuned model
-python src/generate.py --ckpt checkpoints/sft/run_xxx/sft_model.pt --prompt "Question: What is the capital of France?\nAnswer:" \
+python src/generate.py --ckpt checkpoints/sft/run_xxx/sft_model.pt \
+    --tokenizer data/tokenizer_wt103.json \
+    --prompt "Question: What is the capital of France?\nAnswer:" \
     --top_k 50 --temperature 0.7 --repetition_penalty 1.2
 ```
 
@@ -100,7 +111,7 @@ This project contains **two tracks of experiments**:
 | Track | Model | Purpose | Status |
 |---|---|---|---|
 | **Principle Tests** (Part 1) | 16.8M (d256) | Verify training principles: ablation, scaling, SFT | ✅ Complete |
-| **GPU Limit Test** (Part 2) | 177M (d1024) | Push this GPU to its limit, best config only | 🔄 Running |
+| **GPU Limit Test** (Part 2) | 177M (d1024) | Push this GPU to its limit, best config only | ✅ Complete |
 
 ---
 
@@ -215,26 +226,47 @@ Pushing the RTX 4060 Laptop (8GB) to its limit with the largest model it can tra
 | Params | 177.3M |
 | Config | d_model=1024, n_heads=16, n_layers=12, d_ff=2048 |
 | VRAM usage | ~7.3 GB / 8 GB |
-| Training | 16 epochs, batch=8, seq=256 |
-| **Best Val Perplexity** | *pending...* |
+| Training | WikiText-103, batch=12, seq=256 |
+| **Best Val Perplexity** | **89.87** (best.pt; random init = 50257) |
 
-> Training in progress (~10 hours). Results will be filled in when complete.
+#### Training Curves (177M d1024)
+
+![177M d1024 training curves](assets/training_curves.png)
+
+#### Generation Samples (177M, PPL 89.87)
 
 ```
 > The meaning of life is
- The meaning of life is a species which can be used as a variety of
- different species . The species has been described by the species .
+ The meaning of life is in the same position as it is : it is not a
+ case , but also in nature . He has been described as having
+ " really an individual " and argued that the term must be used to
+ refer to any individual or person ...
 
-> In the beginning
- In the beginning of this period , Wheeler played a role with the club
- in a British professional football game , a professional club record
- of four matches . In 2008 , he signed with the First Division Player
- of the Year to a 2 – 1 lead in a five @-@ year contract . In early
- 2013 , he was named the league 's highest appearance in the Division
- I 'll be known for the Conference , which would be
+> In the 19th century, the industrial revolution
+ In the 19th century, the industrial revolution at Bemol in Italy
+ began to be a major point for many of his own own . The building
+ of Jägersch was rebuilt in the 1960s and replaced by another major
+ industrial and commercial building ...
 ```
 
-> The 17M model produces grammatically correct English (subordinate clauses, years), with repetition and nonsense content — normal for small models.
+> The 177M model produces longer, more coherent sentences with richer vocabulary than the 16.8M model — though still with hallucinated facts, normal for this scale.
+
+#### SFT Fine-tuning (177M, Alpaca 52K)
+
+Fine-tuned on the full [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca) instruction set (52K pairs) with **loss masking** (only the `Answer` part gets loss).
+
+**SFT loss trajectory**: 10K subset (3 epochs) → loss 3.13; 52K full (2 epochs) → loss further reduced.
+
+##### 177M SFT test results
+
+| Input | Response (177M after full SFT) |
+|---|---|
+| `Question: What is the capital of France?` | `The capital of France is Paris.` ✅ |
+| `Question: Give three tips for staying healthy.` | `1. Exercise regularly... 2. Eat healthy foods... 3. Spend the amount you need...` ✅ (list format) |
+| `Question: Write a short paragraph about the Industrial Revolution.` | Coherent themed paragraph about technology, productivity, transportation ✅ |
+
+
+> **Full Alpaca (52K) vs 10K**: the 52K model reliably follows **structured instructions** (numbered lists, themed paragraphs), a clear step up from the 10K model which only handled simple Q&A.
 
 ## 📁 Project Structure
 
@@ -242,13 +274,15 @@ Pushing the RTX 4060 Laptop (8GB) to its limit with the largest model it can tra
 ├── src/
 │   ├── model.py         # Decoder-Only Transformer (core)
 │   ├── tokenizer.py     # BPE tokenizer (GPT-2 style ByteLevel)
-│   ├── data.py          # WikiText-2 data pipeline
+│   ├── data.py          # WikiText-2 / WikiText-103 data pipeline (subset modes: first/random/block)
 │   ├── train.py         # pretraining (AMP + cosine LR + EMA + best.pt)
 │   ├── generate.py      # KV-cache generation (greedy / top-k / repetition penalty)
 │   ├── evaluate.py      # PPL evaluation
-│   ├── sft.py           # SFT fine-tuning (loss masking)
-│   ├── make_sft_data.py # SFT instruction data generation
+│   ├── sft.py           # SFT fine-tuning (loss masking, progress bar)
+│   ├── make_sft_data.py # SFT instruction data generation (100 hand-made Q&A)
 │   ├── smoke_test.py    # model correctness smoke tests
+├── scripts/
+│   └── make_alpaca_sft.py  # download & convert Alpaca 52K to sft.py format
 ├── assets/              # training curves (referenced by README)
 ├── data/                # dataset + tokenizer + SFT data (gitignore)
 ├── checkpoints/         # model weights, per-run directories (gitignore)
