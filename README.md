@@ -9,7 +9,6 @@ A small decoder-only Transformer language model built from scratch in PyTorch, i
 - **Hand-written core components**: RMSNorm, RoPE rotary positional embedding, Multi-Head Attention (with KV-cache), SwiGLU FFN, Weight Tying
 - **KV-cache accelerated generation**: caches history K/V during autoregressive inference to avoid recomputation (verified identical to full computation)
 - **Full training pipeline**: mixed-precision AMP, Cosine LR schedule + warmup, Weight decay (AdamW)
-- **Incremental data-block training**: instead of overfitting one fixed 10% slice, the model is trained on successive WikiText-103 blocks (first 10% → second 10%), improving generalization
 - **SFT fine-tuning**: fine-tuned on the full 52K [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca) instruction set (loss masking), model learns `Question/Answer` format, numbered-list & paragraph responses, and generalizes to unseen instructions
 - **Reproducible results**: WikiText-103 val perplexity reduced from random 50257 to **89.87** (177M model), with training curves and full ablation tables
 
