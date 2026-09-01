@@ -1,4 +1,4 @@
-# Tiny Decoder-Only Language Model (from scratch)
+# Small Decoder-Only Language Model (from scratch)
 
 A small decoder-only Transformer language model built from scratch in PyTorch, inspired by Stanford **CS336: Language Modeling from Scratch**. All core components are hand-implemented. Pre-trained on WikiText-103 (177M model) and fine-tuned with SFT. Reproducible on a single consumer GPU (RTX 4060).
 
